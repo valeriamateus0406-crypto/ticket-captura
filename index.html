@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Captura de Tickets – Demo</title>
+<style>
+  :root { --bg:#0f1115; --fg:#eaeef5; --muted:#a9b2c3; --accent:#6ad3ff; --ok:#30d158; --warn:#ffd60a; --err:#ff453a; }
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,Segoe UI,Roboto,Arial}
+  .wrap{max-width:720px;margin:0 auto;padding:16px 20px 32px}
+  h1{font-size:1.25rem;margin:8px 0 2px}
+  p.sub{color:var(--muted);margin:0 0 16px}
+  .card{background:#151823;border:1px solid #1f2431;border-radius:12px;padding:16px;margin:12px 0}
+  label{display:block;margin:10px 0 6px;color:var(--muted)}
+  input,textarea,button,select{
+    width:100%;box-sizing:border-box;background:#0f121a;color:var(--fg);
+    border:1px solid #2a3040;border-radius:10px;padding:12px;outline:none
+  }
+  input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+  textarea{min-height:72px;resize:vertical}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .row > *{flex:1 1 200px}
+  .preview{
+    width:100%;aspect-ratio:3/4;background:#0b0e14;border:1px dashed #2a3040;border-radius:12px;
+    display:grid;place-items:center;overflow:hidden;margin-top:8px
+  }
+  .preview img{width:100%;height:100%;object-fit:cover}
+  .hint{font-size:.9rem;color:var(--muted)}
+  .status{margin-top:12px;padding:10px;border-radius:10px;border:1px solid #283044;background:#0d1220}
+  .status.ok{border-color:#234d2e;background:#0f1a12;color:var(--ok)}
+  .status.warn{border-color:#4d4623;background:#1a170f;color:var(--warn)}
+  .status.err{border-color:#4d2323;background:#1a0f0f;color:var(--err)}
+  .actions{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+  .btn{background:#1b2130;border:1px solid #2a3040;border-radius:10px;padding:12px 14px;cursor:pointer}
+  .btn.primary{background:linear-gradient(180deg,#1e2a40,#162036);border-color:#2a3040}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .small{font-size:.85rem;color:var(--muted)}
+  footer{margin-top:18px;color:var(--muted);font-size:.85rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Captura de Tickets</h1>
+  <p class="sub">Toma una foto, revisa la vista previa y envíala al Webhook de Make.</p>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="store">Caja / Punto</label>
+        <input id="store" placeholder="Caja 01" />
+      </div>
+      <div>
+        <label for="cashier">Cajero/a</label>
+        <input id="cashier" placeholder="Harvey" />
+      </div>
+    </div>
+
+    <label for="ticket">Foto del ticket</label>
+    <input id="ticket" type="file" accept="image/*" capture="environment" />
+    <div class="preview" id="preview">
+      <span class="hint">La vista previa aparecerá aquí</span>
+    </div>
+
+    <label for="notes">Notas (opcional)</label>
+    <textarea id="notes" placeholder="Luz baja, ticket arrugado, etc."></textarea>
+
+    <div class="hint small">Consejo: llena el encuadre, evita sombras duras y mantén el ticket plano.</div>
+
+    <div class="actions">
+      <button id="retake" class="btn" type="button" disabled>Retomar</button>
+      <button id="send" class="btn primary" type="button" disabled>Enviar a Make</button>
+    </div>
+
+    <div id="status" class="status">Esperando captura…</div>
+  </div>
+
+  <footer>
+    Este demo comprime la imagen a JPG y la envía como <strong>multipart/form-data</strong> al Webhook de Make.
+  </footer>
+</div>
+
+<script>
+/* ====== CONFIGURA AQUÍ TU WEBHOOK DE MAKE ====== */
+const WEBHOOK_URL = "https://hook.eu2.make.com/k3guyvcybt11qetzyx6groa8vgvd92ol"; // ← pega aquí tu URL del módulo "Custom webhook" de Make
+/* =============================================== */
+
+const el = sel => document.querySelector(sel);
+const ticketInput = el('#ticket');
+const preview = el('#preview');
+const sendBtn = el('#send');
+const retakeBtn = el('#retake');
+const statusBox = el('#status');
+
+let originalFile = null;
+let compressedBlob = null;
+
+/** Utilidad: leer archivo como Image */
+function fileToImage(file){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Compresión básica: redimensiona respetando relación hasta máx. 1600px (lado mayor) */
+async function compressImage(file, maxSide=1600, quality=0.8){
+  const img = await fileToImage(file);
+  const {naturalWidth:w, naturalHeight:h} = img;
+  let newW = w, newH = h;
+
+  if (Math.max(w,h) > maxSide){
+    const scale = maxSide / Math.max(w,h);
+    newW = Math.round(w * scale);
+    newH = Math.round(h * scale);
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = newW; canvas.height = newH;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, newW, newH);
+
+  return new Promise(resolve=>{
+    canvas.toBlob(blob => resolve(blob), 'image/jpeg', quality);
+  });
+}
+
+/** Render de preview */
+function showPreview(objURL){
+  preview.innerHTML = '';
+  const img = document.createElement('img');
+  img.alt = 'Vista previa del ticket';
+  img.src = objURL;
+  preview.appendChild(img);
+}
+
+/** Estado UI */
+function setStatus(msg, type=''){
+  statusBox.textContent = msg;
+  statusBox.className = 'status ' + (type||'');
+}
+
+/** Manejo de archivo */
+ticketInput.addEventListener('change', async (ev)=>{
+  const file = ev.target.files && ev.target.files[0];
+  if(!file){ return; }
+  originalFile = file;
+  setStatus('Procesando imagen… (compresión y vista previa)');
+  try{
+    compressedBlob = await compressImage(file, 1600, 0.8);
+    const objURL = URL.createObjectURL(compressedBlob);
+    showPreview(objURL);
+    sendBtn.disabled = false;
+    retakeBtn.disabled = false;
+    setStatus(`Listo para enviar. Tamaño comprimido: ${(compressedBlob.size/1024).toFixed(0)} KB`);
+  }catch(err){
+    console.error(err);
+    setStatus('No se pudo procesar la imagen. Intenta de nuevo.', 'err');
+  }
+});
+
+/** Retomar: limpiar selección */
+retakeBtn.addEventListener('click', ()=>{
+  ticketInput.value = '';
+  originalFile = null;
+  compressedBlob = null;
+  preview.innerHTML = '<span class="hint">La vista previa aparecerá aquí</span>';
+  sendBtn.disabled = true;
+  retakeBtn.disabled = true;
+  setStatus('Esperando captura…');
+});
+
+/** Envío a Make (multipart/form-data) */
+sendBtn.addEventListener('click', async ()=>{
+  if(!compressedBlob){ setStatus('No hay imagen para enviar.', 'warn'); return; }
+
+  const store = el('#store').value.trim();
+  const cashier = el('#cashier').value.trim();
+  const notes = el('#notes').value.trim();
+
+  setStatus('Enviando al Webhook de Make…');
+  sendBtn.disabled = true;
+
+  try{
+    const form = new FormData();
+    // Archivo comprimido:
+    const fileName = `ticket_${new Date().toISOString().replace(/[:.]/g,'-')}.jpg`;
+    form.append('ticket_image', compressedBlob, fileName);
+
+    // Metadatos útiles:
+    form.append('store', store);
+    form.append('cashier', cashier);
+    form.append('notes', notes);
+    form.append('client_ts', new Date().toISOString());
+    form.append('original_size_bytes', originalFile ? originalFile.size : 0);
+    form.append('compressed_size_bytes', compressedBlob.size);
+
+    const res = await fetch(WEBHOOK_URL, { method:'POST', body: form });
+    if(!res.ok){
+      const t = await res.text().catch(()=> '');
+      throw new Error(`HTTP ${res.status} – ${t.slice(0,200)}`);
+    }
+
+    setStatus('✅ Enviado correctamente. Puedes capturar otro ticket.', 'ok');
+    // Limpieza suave para siguiente captura
+    ticketInput.value = '';
+    originalFile = null;
+    compressedBlob = null;
+    preview.innerHTML = '<span class="hint">La vista previa aparecerá aquí</span>';
+    sendBtn.disabled = true;
+    retakeBtn.disabled = true;
+
+  }catch(err){
+    console.error(err);
+    setStatus('❌ Error al enviar: ' + err.message, 'err');
+    sendBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
